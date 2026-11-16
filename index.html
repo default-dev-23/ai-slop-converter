@@ -897,6 +897,26 @@ OTHER DEALINGS IN THE SOFTWARE.</pre></details></div>
         if (end < 0) { output += raw.slice(i); break; }
         output += raw.slice(i, end + 1); i = end + 1; continue;
       }
+      // Some chat copy paths omit math delimiters around individual TeX atoms.
+      // Accept only known commands and balanced arguments, never arbitrary slash text.
+      const atom = !escaped(i) && raw.slice(i).match(/^\\(text|mathrm|mathbf|mathit|operatorname|frac|sqrt)\b/);
+      if (atom) {
+        let end = i + atom[0].length, valid = true;
+        const groups = atom[1] === 'frac' ? 2 : 1;
+        for (let group = 0; group < groups; group++) {
+          while (raw[end] === ' ') end++;
+          if (raw[end] !== '{') { valid = false; break; }
+          let depth = 0;
+          do { if (!escaped(end)) { if (raw[end] === '{') depth++; if (raw[end] === '}') depth--; } end++; } while (end < raw.length && depth);
+          if (depth) { valid = false; break; }
+        }
+        if (valid) {
+          const script = raw.slice(end).match(/^(?:[_^](?:\{[^{}\n]*\}|[a-zA-Z0-9+−-]))*/)[0];
+          end += script.length; output += add(raw.slice(i, end), false); i = end; continue;
+        }
+      }
+      const symbol = !escaped(i) && raw.slice(i).match(/^\\(?:rightarrow|leftarrow|leftrightarrow|Rightarrow|Leftarrow|Leftrightarrow|to|times|cdot|pm|leq|geq|neq|infty|alpha|beta|gamma|delta|epsilon|theta|lambda|mu|pi|sigma|phi|omega)\b/);
+      if (symbol) { output += add(symbol[0], false); i += symbol[0].length; continue; }
       const environment = !escaped(i) && raw.slice(i).match(/^\\begin\{(equation\*?|align\*?|aligned|gather\*?|gathered|multline\*?|cases|matrix|pmatrix|bmatrix|vmatrix)\}/);
       if (environment) {
         const ending = '\\end{' + environment[1] + '}', close = raw.indexOf(ending, i + environment[0].length);
@@ -1105,14 +1125,10 @@ OTHER DEALINGS IN THE SOFTWARE.</pre></details></div>
       if (tag === 'IMG') return '[Image: ' + (node.getAttribute('alt') || 'not included') + ']';
       if (tag === 'INPUT') return node.type === 'checkbox' ? (node.checked ? '[x] ' : '[ ] ') : '';
       if (tag === 'TABLE') {
-        const rows = Array.from(node.querySelectorAll('tr')).map(row => Array.from(row.children).map(cell => {
-          const protectedText = protectMath(Array.from(cell.childNodes).map(inline).join('').trim());
-          return restoreMath(protectedText, protectedText.output.replace(/\n+/g, '<br>').replace(/\|/g, '\\|'));
-        }));
-        if (!rows.length) return '';
-        const columns = Math.max(...rows.map(row => row.length));
-        const rowText = row => '| ' + Array.from({length:columns}, (_, i) => row[i] || '').join(' | ') + ' |';
-        return '\n\n' + rowText(rows[0]) + '\n' + rowText(Array(columns).fill('---')) + '\n' + rows.slice(1).map(rowText).join('\n') + '\n\n';
+        // Preserve native clipboard table structure, including lists, merged
+        // cells and paragraphs. Sanitization still happens before DOM insertion.
+        return '\n\n' + node.outerHTML + '\n\n';
+
       }
       if (tag === 'UL' || tag === 'OL') {
         let index = Number(node.getAttribute('start')) || 1;
@@ -1138,6 +1154,55 @@ OTHER DEALINGS IN THE SOFTWARE.</pre></details></div>
     const match = /^\s*(`{3,}|~{3,})(?:markdown|md)\s*\n([\s\S]*?)\n\1\s*$/i.exec(raw);
     return match ? match[2] : raw;
   }
+  function recoverTables(raw) {
+    const lines = raw.split('\n'), result = [];
+    let fence = '';
+    const clean = line => line.replace(/^(\s*)\\\|/, '$1|').replace(/\\\s*$/, '').replace(/&#(?:x20|32);|&nbsp;/gi, ' ');
+    // Split outside escaped pipes and code spans. Math is already tokenized.
+    const cells = line => {
+      const parts = []; let current = '', ticks = 0;
+      for (let i = 0; i < line.length; i++) {
+        if (line[i] === '\\' && line[i + 1] === '|') { current += '\\|'; i++; continue; }
+        if (line[i] === '`') { let n=1;while(line[i+n]==='`')n++;if(!ticks)ticks=n;else if(ticks===n)ticks=0;current+='`'.repeat(n);i+=n-1;continue; }
+        if (line[i] === '|' && !ticks) { parts.push(current); current = ''; } else current += line[i];
+      }
+      parts.push(current);
+      if (!parts[0].trim()) parts.shift();
+      if (!parts[parts.length - 1]?.trim()) parts.pop();
+      return parts;
+    };
+    const cellHtml = value => {
+      value = value.replace(/^(\s*)\\([*+-])(?=\s)/gm, '$1$2');
+      // Unicode bullets occur in copied rendered responses as well as Markdown.
+      value = value.replace(/^(\s*)[•●▪–](?=\s)/gm, '$1-');
+      return marked.parse(value.trim(), {gfm:true,breaks:true});
+    };
+    for (let i=0; i<lines.length; i++) {
+      const marker = /^ {0,3}(`{3,}|~{3,})/.exec(lines[i]);
+      if (marker) { if(!fence)fence=marker[1];else if(marker[1][0]===fence[0]&&marker[1].length>=fence.length)fence=''; result.push(lines[i]);continue; }
+      if (fence || /^ {4}|^\t/.test(lines[i])) {result.push(lines[i]);continue;}
+      const header = clean(lines[i]), separator = i+1<lines.length ? clean(lines[i+1]) : '';
+      const headings = cells(header), dividers = cells(separator);
+      if (headings.length<2 || !header.includes('|') || dividers.length!==headings.length || !dividers.every(cell=>/^\s*:?-{3,}:?\s*$/.test(cell))) {result.push(lines[i]);continue;}
+      const rows = []; let j = i+2, malformed = false;
+      while (j<lines.length && /^\s*\\?\|/.test(lines[j])) {
+        let row = clean(lines[j]), end=j+1;
+        while ((cells(row).length<headings.length || !/(^|[^\\])\|\s*$/.test(row)) && end<lines.length && lines[end].trim() && !/^\s*\\?\|/.test(lines[end]) && !/^\s*(?:#{1,6}\s|`{3,}|~{3,})/.test(lines[end])) row += '\n' + clean(lines[end++]);
+        const values = cells(row);
+        if(values.length!==headings.length) {malformed=true;break;}
+        rows.push(values);j=end;
+      }
+      if (malformed || !rows.length) {result.push(lines[i]);continue;}
+      // Only replace tables needing recovery; let standard GFM handle normal rows.
+      const original=lines.slice(i,j).join('\n');
+      if (!rows.some(row=>row.some(cell=>cell.includes('\n'))) && !/^\s*\\\|/m.test(original) && !/\\\s*$/m.test(original)) {result.push(lines[i]);continue;}
+      const aligns=dividers.map(cell=>cell.trim().endsWith(':')?(cell.trim().startsWith(':')?'center':'right'):'left');
+      const rowHtml=(row,tag)=>'<tr>'+row.map((cell,index)=>'<' + tag+' align="'+aligns[index]+'">'+cellHtml(cell)+'</'+tag+'>').join('')+'</tr>';
+      result.push('\n<table><thead>'+rowHtml(headings,'th')+'</thead><tbody>'+rows.map(row=>rowHtml(row,'td')).join('')+'</tbody></table>\n');
+      i=j-1;
+    }
+    return result.join('\n');
+  }
   function render() {
     clearTimeout(timer); mathErrors = 0;
     const raw = source.value.replace(/\r\n?/g, '\n').replace(/^\uFEFF/, '');
@@ -1153,7 +1218,7 @@ OTHER DEALINGS IN THE SOFTWARE.</pre></details></div>
       } else {
         const markdown = activeFormat === 'html' ? htmlToMarkdown(raw) : unwrapMarkdown(raw);
         const protectedText = protectMath(markdown);
-        renderMarkdown(protectedText.output); insertMath(protectedText); decorate();
+        renderMarkdown(recoverTables(protectedText.output)); insertMath(protectedText); decorate();
       }
       applyLayout();
       status(mathErrors ? 'Some formulas use unsupported notation; their source is preserved.' : 'Preview ready.', !!mathErrors);
@@ -1210,7 +1275,7 @@ OTHER DEALINGS IN THE SOFTWARE.</pre></details></div>
     // HTML. Prefer HTML when it contains the original TeX annotations.
     const hasTex = /application\/x-tex/.test(html);
     const hasMarkdown = /(?:^|\n)\s*(?:#{1,6}\s|```|~~~|\|.*\||>\s|[-*]\s)|\\[[(]|\$\$|\*\*\S/.test(plain);
-    if (plain && hasMarkdown && !hasTex) return;
+    if (plain && hasMarkdown && !hasTex && !/<table\b/i.test(html)) return;
     const converted = htmlToMarkdown(html);
     if (!converted) return;
     if (source.value.length - (source.selectionEnd - source.selectionStart) + converted.length > MAX_LENGTH) {
