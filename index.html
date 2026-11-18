@@ -74,7 +74,7 @@ dialog{border:1px solid var(--border);background:var(--surface);color:var(--ink)
       <div class="export-bar"><p id="status" role="status" aria-live="polite">Ready when you are.</p><div class="export-actions"><button class="button" id="copy" disabled><svg><use href="#i-copy"/></svg><span>Copy image</span></button><button class="button primary" id="save" disabled><svg><use href="#i-save"/></svg><span>Save image</span></button></div></div>
     </section>
   </main>
-  <footer class="app-footer"><span>AI Slop Converter · Build 2026.11.16.4</span><span>One file. No account. No uploads.</span></footer>
+  <footer class="app-footer"><span>AI Slop Converter · Build 2026.11.18.1</span><span>One file. No account. No uploads.</span></footer>
   <dialog id="export-dialog" aria-labelledby="export-title">
     <div class="dialog-heading"><div><h2 id="export-title">Save your image</h2><p id="export-details">Preparing image…</p></div><button class="icon-button" id="close-export" aria-label="Close save dialog"><svg><use href="#i-close"/></svg></button></div>
     <div class="export-image-area" id="export-image-area"><p id="render-message" role="status" aria-live="polite">Preparing image…</p><img id="result-image" alt="Your converted response" hidden></div>
@@ -899,6 +899,15 @@ OTHER DEALINGS IN THE SOFTWARE.</pre></details></div>
       }
       // Some chat copy paths omit math delimiters around individual TeX atoms.
       // Accept only known commands and balanced arguments, never arbitrary slash text.
+      const decimal = !escaped(i) && raw.slice(i).match(/^\d+(?:\{,\}\d+)+/);
+      if (decimal) { output += add(decimal[0], false); i += decimal[0].length; continue; }
+      // Outside a complete formula, TeX spacing must not become a visible comma.
+      // Delimited formulas have already consumed their entire contents as one token.
+      const spacing = !escaped(i) && raw.slice(i).match(/^\\(?:[,;:]|qquad\b|quad\b)/);
+      if (spacing) {
+        output += ({'\\,':'\u2009','\\;':'\u2005','\\:':'\u205f','\\quad':'\u2003','\\qquad':'\u2003\u2003'})[spacing[0]];
+        i += spacing[0].length; continue;
+      }
       const atom = !escaped(i) && raw.slice(i).match(/^\\(text|mathrm|mathbf|mathit|operatorname|frac|sqrt)\b/);
       if (atom) {
         let end = i + atom[0].length, valid = true;
@@ -915,7 +924,7 @@ OTHER DEALINGS IN THE SOFTWARE.</pre></details></div>
           end += script.length; output += add(raw.slice(i, end), false); i = end; continue;
         }
       }
-      const symbol = !escaped(i) && raw.slice(i).match(/^\\(?:rightarrow|leftarrow|leftrightarrow|Rightarrow|Leftarrow|Leftrightarrow|to|times|cdot|pm|leq|geq|neq|infty|alpha|beta|gamma|delta|epsilon|theta|lambda|mu|pi|sigma|phi|omega)\b/);
+      const symbol = !escaped(i) && raw.slice(i).match(/^\\(?:rightarrow|leftarrow|leftrightarrow|Rightarrow|Leftarrow|Leftrightarrow|to|times|div|cdot|pm|leq|geq|neq|infty|alpha|beta|gamma|delta|epsilon|theta|lambda|mu|pi|sigma|phi|omega)\b/);
       if (symbol) { output += add(symbol[0], false); i += symbol[0].length; continue; }
       const environment = !escaped(i) && raw.slice(i).match(/^\\begin\{(equation\*?|align\*?|aligned|gather\*?|gathered|multline\*?|cases|matrix|pmatrix|bmatrix|vmatrix)\}/);
       if (environment) {
